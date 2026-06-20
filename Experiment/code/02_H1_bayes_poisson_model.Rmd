@@ -1,0 +1,437 @@
+---
+title: "Bayesian Poisson Mixed Model"
+author: "Astrid Elmann Hansen"
+date: "2026-05-20"
+output:
+  html_document:
+    output_dir: "../html_output"
+---
+# Setup
+
+```{r setup}
+#install.packages("pacman")
+pacman::p_load(tidyverse, brms, cmdstanr, bayesplot, posterior)
+
+options(brms.backend = "cmdstanr")
+
+theme_set(theme_minimal())
+```
+
+```{r}
+sessionInfo()
+```
+
+
+# Load data
+
+```{r}
+df <- read_csv('../data/round.csv')
+df$condition_FUN <- ifelse(df$condition == "FUN", 1, 0)
+```
+
+# Inspect data
+
+```{r}
+glimpse(df)
+```
+
+# Convert variables
+
+```{r}
+df <- df %>%
+  arrange(player_id, round) %>%                       # ensure within-player chronology
+  group_by(player_id, condition) %>%
+  mutate(encounter = row_number()) %>%                # 1st vs 2nd time player saw this condition
+  ungroup() %>%
+  mutate(
+    player_id     = factor(player_id),
+    group         = factor(group),
+    condition_FUN = factor(condition_FUN),
+    encounter     = factor(encounter)
+  )
+```
+
+# Priors - see 01_H1_bayesian_priors.ipynb for details
+
+```{r}
+priors <- c(
+  prior(normal(1, 1),   class = "Intercept"), 
+  prior(normal(0.2, 0.5), class = "b"),     
+  prior(normal(0, 1),   class = "sd")         
+)
+```
+
+
+# Fit model
+
+```{r}
+fit <- brm(
+  formula = tags_in_round ~ condition_FUN + (1 | group/player_id),
+  # (1 | group/player_id) expands to (1 | group) + (1 | group:player_id).
+  # Players are nested in groups (rounds were played group-wise), so a
+  # group-level intercept is part of the design structure regardless of
+  # whether σ_group ends up large. With 8 groups and the HalfNormal(0,1)
+  # prior on `sd`, σ_group is conservatively regularised toward zero if
+  # there is little group-level variance to detect.
+  
+  data = df,
+  
+  family = poisson(),
+  
+  prior = priors,
+  
+  chains = 4,
+  iter = 3000,
+  warmup = 1000,
+  cores = 4,
+  
+  backend = "cmdstanr",
+  
+  seed = 42,
+  
+  control = list(
+    adapt_delta = 0.95
+  )
+)
+```
+
+# Model summary
+
+```{r}
+summary(fit)
+```
+
+# Diagnostics
+
+## Trace plots
+
+```{r}
+plot(fit)
+```
+
+## Rhat and ESS
+
+```{r}
+# R-hat and ESS from model summary
+s <- summary(fit)
+s$fixed        # fixed effects with Rhat and ESS
+s$random       # random effects (sigma_player AND sigma_group) with Rhat and ESS
+```
+
+```{r}
+# Extract the two random-intercept SDs explicitly
+post <- as_draws_df(fit)
+
+sigma_group  <- post$sd_group__Intercept
+sigma_player <- post$`sd_group:player_id__Intercept`
+
+cat("σ_group  (between-group variation):\n")
+cat("  Median: ", round(median(sigma_group), 3), "\n")
+cat("  95% CrI: [", round(quantile(sigma_group, 0.025), 3),
+              ",", round(quantile(sigma_group, 0.975), 3), "]\n\n")
+
+cat("σ_player (between-player variation, within group):\n")
+cat("  Median: ", round(median(sigma_player), 3), "\n")
+cat("  95% CrI: [", round(quantile(sigma_player, 0.025), 3),
+              ",", round(quantile(sigma_player, 0.975), 3), "]\n")
+```
+
+
+```{r}
+max_rhat <- max(rhat(fit))
+min_ess  <- min(neff_ratio(fit)) * 8000   # convert ratio to absolute ESS
+
+cat("Max R-hat:", round(max_rhat, 3), "\n")
+cat("Min ESS:  ", round(min_ess), "\n")
+```
+
+# Posterior distributions
+
+```{r}
+posterior_summary(fit)
+```
+
+# Posterior predictive checks
+
+```{r}
+pp_check(fit)
+```
+
+
+# Plot marginal effects
+
+```{r}
+plot(conditional_effects(fit))
+```
+
+```{r}
+post <- as_draws_df(fit)
+
+irr_samples <- exp(post$b_condition_FUN1)
+
+cat("Posterior IRR (FUN vs WIN):\n")
+cat("  Median:    ", round(median(irr_samples), 3), "\n")
+cat("  95% CrI:  [", round(quantile(irr_samples, 0.025), 3),
+                 ",", round(quantile(irr_samples, 0.975), 3), "]\n")
+cat("  P(IRR>1): ", round(mean(irr_samples > 1), 4), "\n")
+```
+
+
+```{r}
+tibble(irr = irr_samples) |>
+  ggplot(aes(x = irr)) +
+  geom_histogram(bins = 60, fill = "#DC267F", alpha = 0.7) +
+  geom_vline(xintercept = 1, linetype = "dotted", colour = "grey50") +
+  geom_vline(xintercept = median(irr_samples), linetype = "dashed") +
+  labs(x = "Incidence Rate Ratio (FUN / WIN)",
+       y = "Posterior samples",
+       title = paste0("Posterior P(IRR > 1) = ", round(mean(irr_samples > 1), 4))) +
+  theme_minimal()
+```
+
+
+# Save model
+
+```{r}
+saveRDS(fit, "02_H1_bayes_poisson_model.rds")
+```
+
+
+# Sensitivity check: adding encounter
+
+The pilot showed strong condition-order effects, which is why the main study
+counterbalanced WFWF vs FWFW. Counterbalancing should average order effects
+out of the H1 estimate, but as a sensitivity check we refit the same model
+adding `encounter` (1st vs 2nd time the player encountered this condition)
+as a fixed effect. If the condition IRR is stable, the primary H1 result is
+robust to the order/encounter dynamic.
+
+```{r}
+fit_enc <- brm(
+  formula = tags_in_round ~ condition_FUN + encounter + (1 | group/player_id),
+  
+  data = df,
+  
+  family = poisson(),
+  
+  prior = priors,
+  
+  chains = 4,
+  iter = 3000,
+  warmup = 1000,
+  cores = 4,
+  
+  backend = "cmdstanr",
+  
+  seed = 42,
+  
+  control = list(
+    adapt_delta = 0.95
+  )
+)
+```
+
+```{r}
+summary(fit_enc)
+```
+
+```{r}
+# IRR for condition_FUN, marginal over encounter
+post_enc <- as_draws_df(fit_enc)
+irr_enc  <- exp(post_enc$b_condition_FUN1)
+
+# IRR for encounter (encounter 2 vs encounter 1)
+irr_enc_enc <- exp(post_enc$b_encounter2)
+
+cat("── Sensitivity model (with encounter as covariate) ──\n\n")
+cat("Condition IRR (FUN vs WIN):\n")
+cat("  Median:  ", round(median(irr_enc), 3), "\n")
+cat("  95% CrI: [", round(quantile(irr_enc, 0.025), 3),
+               ",", round(quantile(irr_enc, 0.975), 3), "]\n")
+cat("  P(IRR>1):", round(mean(irr_enc > 1), 4), "\n\n")
+
+cat("Encounter IRR (2nd vs 1st):\n")
+cat("  Median:  ", round(median(irr_enc_enc), 3), "\n")
+cat("  95% CrI: [", round(quantile(irr_enc_enc, 0.025), 3),
+               ",", round(quantile(irr_enc_enc, 0.975), 3), "]\n")
+```
+
+```{r}
+# Direct comparison with the primary model
+irr_primary <- exp(as_draws_df(fit)$b_condition_FUN1)
+
+comparison <- tibble::tribble(
+  ~model,           ~median,                ~lower,                              ~upper,
+  "Primary",        median(irr_primary),    quantile(irr_primary, 0.025),        quantile(irr_primary, 0.975),
+  "+ encounter",    median(irr_enc),        quantile(irr_enc, 0.025),            quantile(irr_enc, 0.975),
+)
+comparison %>% mutate(across(c(median, lower, upper), ~round(., 3)))
+```
+
+```{r}
+saveRDS(fit_enc, "02_H1_bayes_poisson_model_encounter.rds")
+```
+
+
+```{r}
+# Load model
+fit <- readRDS("02_H1_bayes_poisson_model.rds")
+```
+
+```{r}
+post <- as_draws_df(fit)
+
+irr_samples <- exp(post$b_condition_FUN1)
+
+tibble(irr = irr_samples) |>
+  ggplot(aes(x = irr)) +
+  geom_histogram(bins = 60, fill = "#DC267F", alpha = 0.7, colour = NA) +
+  geom_vline(xintercept = 1,                linetype = "dotted", colour = "#5A5A7A") +
+  geom_vline(xintercept = median(irr_samples), linetype = "dashed", colour = "#1C1C2E") +
+  labs(x = "Incidence Rate Ratio (FUN / WIN)",
+       y = "Posterior samples",
+       title = paste0("Posterior P(IRR > 1) > 0.9999")) +
+  theme_minimal(base_size = 9) +
+  theme(
+    plot.background  = element_rect(fill = "#F8F5F0", colour = NA),
+    panel.background = element_rect(fill = "#F8F5F0", colour = NA),
+    panel.grid.major = element_line(colour = "#E2DDD6"),
+    panel.grid.minor = element_blank(),
+    axis.text        = element_text(colour = "#5A5A7A"),
+    axis.title       = element_text(colour = "#5A5A7A"),
+    plot.title       = element_text(colour = "#1C1C2E", face = "bold"),
+    axis.line        = element_line(colour = "#E2DDD6"),
+    axis.ticks       = element_line(colour = "#E2DDD6")
+  )
+
+ggsave("../plots/posterior_irr.png", width = 7, height = 4.5, dpi = 200, bg = "#F8F5F0")
+```
+
+# Fit model
+
+```{r}
+df <- df %>% filter(group != "E")
+
+fit <- brm(
+  formula = tags_in_round ~ condition_FUN + (1 | group/player_id),
+  # (1 | group/player_id) expands to (1 | group) + (1 | group:player_id).
+  # Players are nested in groups (rounds were played group-wise), so a
+  # group-level intercept is part of the design structure regardless of
+  # whether σ_group ends up large. With 8 groups and the HalfNormal(0,1)
+  # prior on `sd`, σ_group is conservatively regularised toward zero if
+  # there is little group-level variance to detect.
+  
+  data = df,
+  
+  family = poisson(),
+  
+  prior = priors,
+  
+  chains = 4,
+  iter = 3000,
+  warmup = 1000,
+  cores = 4,
+  
+  backend = "cmdstanr",
+  
+  seed = 42,
+  
+  control = list(
+    adapt_delta = 0.95
+  )
+)
+```
+
+# Model summary
+
+```{r}
+summary(fit)
+```
+
+# Diagnostics
+
+## Trace plots
+
+```{r}
+plot(fit)
+```
+
+## Rhat and ESS
+
+```{r}
+# R-hat and ESS from model summary
+s <- summary(fit)
+s$fixed        # fixed effects with Rhat and ESS
+s$random       # random effects (sigma_player AND sigma_group) with Rhat and ESS
+```
+
+```{r}
+# Extract the two random-intercept SDs explicitly
+post <- as_draws_df(fit)
+
+sigma_group  <- post$sd_group__Intercept
+sigma_player <- post$`sd_group:player_id__Intercept`
+
+cat("σ_group  (between-group variation):\n")
+cat("  Median: ", round(median(sigma_group), 3), "\n")
+cat("  95% CrI: [", round(quantile(sigma_group, 0.025), 3),
+              ",", round(quantile(sigma_group, 0.975), 3), "]\n\n")
+
+cat("σ_player (between-player variation, within group):\n")
+cat("  Median: ", round(median(sigma_player), 3), "\n")
+cat("  95% CrI: [", round(quantile(sigma_player, 0.025), 3),
+              ",", round(quantile(sigma_player, 0.975), 3), "]\n")
+```
+
+
+```{r}
+max_rhat <- max(rhat(fit))
+min_ess  <- min(neff_ratio(fit)) * 8000   # convert ratio to absolute ESS
+
+cat("Max R-hat:", round(max_rhat, 3), "\n")
+cat("Min ESS:  ", round(min_ess), "\n")
+```
+
+# Posterior distributions
+
+```{r}
+posterior_summary(fit)
+```
+
+# Posterior predictive checks
+
+```{r}
+pp_check(fit)
+```
+
+
+# Plot marginal effects
+
+```{r}
+plot(conditional_effects(fit))
+```
+
+```{r}
+post <- as_draws_df(fit)
+
+irr_samples <- exp(post$b_condition_FUN1)
+
+cat("Posterior IRR (FUN vs WIN):\n")
+cat("  Median:    ", round(median(irr_samples), 3), "\n")
+cat("  95% CrI:  [", round(quantile(irr_samples, 0.025), 3),
+                 ",", round(quantile(irr_samples, 0.975), 3), "]\n")
+cat("  P(IRR>1): ", round(mean(irr_samples > 1), 4), "\n")
+```
+
+
+```{r}
+tibble(irr = irr_samples) |>
+  ggplot(aes(x = irr)) +
+  geom_histogram(bins = 60, fill = "#DC267F", alpha = 0.7) +
+  geom_vline(xintercept = 1, linetype = "dotted", colour = "grey50") +
+  geom_vline(xintercept = median(irr_samples), linetype = "dashed") +
+  labs(x = "Incidence Rate Ratio (FUN / WIN)",
+       y = "Posterior samples",
+       title = paste0("Posterior P(IRR > 1) = ", round(mean(irr_samples > 1), 4))) +
+  theme_minimal()
+```

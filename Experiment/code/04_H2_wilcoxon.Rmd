@@ -1,0 +1,206 @@
+---
+title: "H2 — Self-handicap: Wilcoxon tests"
+author: "Astrid Elmann Hansen"
+date: "2026-05-20"
+output:
+  html_document:
+    output_dir: "../html_output"
+---
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+pacman::p_load(tidyverse, rstatix, ggpubr)
+theme_set(theme_minimal())
+```
+
+```{r}
+sessionInfo()
+```
+
+# Load data
+
+```{r}
+df <- read_csv('../data/mean_round.csv')
+```
+
+All items coded higher = more self-handicap:
+
+* `mean_composite_self_handicap` : mean of the three items
+* `mean_ran_max_speed`           : "I ran as fast as possible" (1=very often … 5=never)
+* `mean_REVERSED_gave_chance`    : "I gave the catcher a chance on purpose" (reversed)
+* `mean_REVERSED_let_close`      : "I let the catcher get near me on purpose" (reversed)
+
+# Inspect
+
+```{r}
+df %>%
+  select(player_id, condition,
+         mean_composite_self_handicap,
+         mean_ran_max_speed, mean_REVERSED_gave_chance, mean_REVERSED_let_close) %>%
+  glimpse()
+```
+
+
+# Scale reliability
+
+```{r reliability, message=FALSE, warning=FALSE}
+items_mat <- df %>%
+  select(mean_ran_max_speed, mean_REVERSED_gave_chance, mean_REVERSED_let_close)
+
+cat("N for reliability analysis:", nrow(items_mat), "\n\n")
+
+cat("Inter-item correlations:\n")
+print(round(cor(items_mat, use = "complete.obs"), 3))
+
+a <- psych::alpha(items_mat)
+cat("\nCronbach's alpha:", round(a$total$raw_alpha, 3), "\n")
+cat("95% CI: [",
+    round(a$total$raw_alpha - 1.96 * a$total$ase, 3), ",",
+    round(a$total$raw_alpha + 1.96 * a$total$ase, 3), "]\n")
+```
+
+
+# Pivot to wide (one row per player)
+
+```{r}
+items <- c("mean_composite_self_handicap",
+           "mean_ran_max_speed",
+           "mean_REVERSED_gave_chance",
+           "mean_REVERSED_let_close")
+
+wide <- df %>%
+  select(player_id, condition, all_of(items)) %>%
+  pivot_wider(names_from  = condition,
+              values_from = all_of(items))
+
+glimpse(wide)
+```
+
+# Primary: composite — paired Wilcoxon
+
+```{r}
+wt_composite <- wilcox.test(
+  wide$mean_composite_self_handicap_FUN,
+  wide$mean_composite_self_handicap_WIN,
+  paired    = TRUE,
+  exact     = FALSE,
+  conf.int  = TRUE
+)
+wt_composite
+
+# Effect size r = Z / sqrt(N)
+n   <- nrow(wide)
+z   <- qnorm(wt_composite$p.value / 2, lower.tail = FALSE)
+r   <- z / sqrt(n)
+
+cat("\nEffect size r =", round(r, 3), "\n")
+cat("n higher in FUN:", sum(wide$mean_composite_self_handicap_FUN >
+                             wide$mean_composite_self_handicap_WIN, na.rm = TRUE), "\n")
+cat("n higher in WIN:", sum(wide$mean_composite_self_handicap_FUN <
+                             wide$mean_composite_self_handicap_WIN, na.rm = TRUE), "\n")
+cat("n tied:         ", sum(wide$mean_composite_self_handicap_FUN ==
+                             wide$mean_composite_self_handicap_WIN, na.rm = TRUE), "\n")
+```
+
+# Secondary: item-level — Bonferroni corrected (α = 0.05 / 3 ≈ 0.017)
+
+```{r}
+item_cols <- c("mean_ran_max_speed",
+               "mean_REVERSED_gave_chance",
+               "mean_REVERSED_let_close")
+
+item_results <- map_dfr(item_cols, function(col) {
+  fun_col <- paste0(col, "_FUN")
+  win_col <- paste0(col, "_WIN")
+  wt <- wilcox.test(wide[[fun_col]], wide[[win_col]],
+                    paired = TRUE, exact = FALSE)
+  z_i <- qnorm(wt$p.value / 2, lower.tail = FALSE)
+  tibble(
+    item      = col,
+    W         = wt$statistic,
+    p_raw     = wt$p.value,
+    r         = z_i / sqrt(nrow(wide)),
+    n_fun_hi  = sum(wide[[fun_col]] > wide[[win_col]], na.rm = TRUE),
+    n_win_hi  = sum(wide[[fun_col]] < wide[[win_col]], na.rm = TRUE)
+  )
+})
+
+# Bonferroni correction
+item_results <- item_results %>%
+  mutate(
+    p_bonferroni = p.adjust(p_raw, method = "bonferroni"),
+    sig_bonf     = p_bonferroni < 0.05
+  )
+
+item_results %>%
+  mutate(across(c(p_raw, p_bonferroni), ~formatC(., format="e", digits=2)),
+         across(c(W, r), ~round(., 3)))
+```
+
+# Descriptive summary
+
+```{r}
+df %>%
+  group_by(condition) %>%
+  summarise(across(all_of(items),
+                   list(median = median, mean = mean, sd = sd),
+                   .names = "{.col}__{.fn}"),
+            .groups = "drop") %>%
+  pivot_longer(-condition, names_to = c("item", "stat"), names_sep = "__") %>%
+  pivot_wider(names_from = stat, values_from = value) %>%
+  mutate(across(c(median, mean, sd), ~round(., 2)))
+```
+
+# Plot — composite
+
+```{r fig.width=8, fig.height=4}
+p1 <- df %>%
+  ggplot(aes(x = condition, y = mean_composite_self_handicap, fill = condition)) +
+  geom_boxplot(alpha = 0.5, width = 0.4, outlier.shape = NA) +
+  geom_jitter(aes(colour = condition), width = 0.08, alpha = 0.5, size = 1.5) +
+  scale_fill_manual(values   = c(FUN = "#DC267F", WIN = "#648FFF")) +
+  scale_colour_manual(values = c(FUN = "#DC267F", WIN = "#648FFF")) +
+  labs(y = "composite self-handicap", x = NULL,
+       title = "Composite self-handicap by condition") +
+  theme(legend.position = "none")
+
+p2 <- wide %>%
+  select(player_id,
+         FUN = mean_composite_self_handicap_FUN,
+         WIN = mean_composite_self_handicap_WIN) %>%
+  pivot_longer(-player_id, names_to = "condition", values_to = "score") %>%
+  ggplot(aes(x = condition, y = score)) +
+  geom_line(aes(group = player_id), colour = "grey70", alpha = 0.6) +
+  geom_point(aes(colour = condition), size = 2, alpha = 0.8) +
+  scale_colour_manual(values = c(FUN = "#DC267F", WIN = "#648FFF")) +
+  labs(y = NULL, x = NULL,
+       title = "Within-player change") +
+  theme(legend.position = "none")
+
+ggarrange(p1, p2, ncol = 2)
+```
+
+# Plot — individual items
+
+```{r fig.width=10, fig.height=4}
+item_labels <- c(
+  mean_ran_max_speed          = "Ran at max speed",
+  mean_REVERSED_gave_chance   = "Gave tagger a chance",
+  mean_REVERSED_let_close     = "Let tagger get close"
+)
+
+df %>%
+  select(player_id, condition, all_of(item_cols)) %>%
+  pivot_longer(all_of(item_cols), names_to = "item", values_to = "score") %>%
+  mutate(item = recode(item, !!!item_labels)) %>%
+  ggplot(aes(x = condition, y = score, fill = condition)) +
+  geom_boxplot(alpha = 0.5, width = 0.4, outlier.shape = NA) +
+  geom_jitter(aes(colour = condition), width = 0.08, alpha = 0.4, size = 1.2) +
+  scale_fill_manual(values   = c(FUN = "#DC267F", WIN = "#648FFF")) +
+  scale_colour_manual(values = c(FUN = "#DC267F", WIN = "#648FFF")) +
+  facet_wrap(~item, nrow = 1) +
+  labs(y = "score (1–5, higher = more self-handicap)", x = NULL,
+       title = "Individual items by condition (Bonferroni α = 0.017)") +
+  theme(legend.position = "none")
+```

@@ -1,0 +1,78 @@
+---
+title: "Frequentist Poisson Model — GLMM"
+author: "Astrid Elmann Hansen"
+date: "2026-05-20"
+output:
+  html_document:
+    output_dir: "../html_output"
+---
+
+# Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+#install.packages("pacman")
+pacman::p_load(tidyverse, lme4, parameters, merDeriv)
+
+theme_set(theme_minimal())
+```
+
+```{r}
+sessionInfo()
+```
+
+# Load data
+
+```{r}
+df <- read_csv('../data/round.csv')
+```
+
+# Inspect data
+
+```{r}
+glimpse(df)
+```
+
+# Convert variables
+
+```{r}
+df <- df %>%
+  arrange(player_id, round) %>%
+  group_by(player_id, condition) %>%
+  mutate(encounter = row_number()) %>%          # 1st vs 2nd time player saw this condition
+  ungroup() %>%
+  mutate(
+    player_id     = factor(player_id),
+    group         = factor(group),
+    condition_FUN = as.integer(condition == "FUN"),   # numeric 0/1 for GEE
+    round_c       = round - mean(round),              # centred round position
+    encounter     = factor(encounter)
+  ) %>%
+  # geepack requires data sorted by the clustering variable
+  arrange(player_id)
+```
+
+
+# Model
+
+```{r}
+# Primary model: matches the main brms model
+m1_glmm <- glmer(
+  tags_in_round ~ condition_FUN + (1 | group) + (1 | player_id),
+  data    = df,
+  family  = poisson(link = "log")
+)
+
+# Sensitivity: matches the brms + encounter model
+m2_glmm <- glmer(
+  tags_in_round ~ condition_FUN + encounter + (1 | group) + (1 | player_id),
+  data    = df,
+  family  = poisson(link = "log")
+)
+
+# IRRs with Wald CIs (fast)
+parameters::model_parameters(m1_glmm, exponentiate = TRUE)
+parameters::model_parameters(m2_glmm, exponentiate = TRUE)
+
+# Profile-likelihood CIs (slower but better for small samples)
+exp(confint(m1_glmm, parm = "condition_FUN", method = "profile"))
+```
