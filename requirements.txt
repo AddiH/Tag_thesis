@@ -1,0 +1,6 @@
+itables
+matplotlib
+mesa<3
+numpy
+pandas
+scipy
