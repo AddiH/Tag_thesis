@@ -1,4 +1,4 @@
-# ODD Protocol Description — Tag ABM (v2, fixed-weight design)
+# ODD Protocol Description — Tag ABM
 
 **Model:** A Mesa-based agent-based model of agents playing the game of tag
 **Source files:** `tag_abm.py` (model), `tag_abm_main_v2.ipynb` (simulation & calibration driver)
