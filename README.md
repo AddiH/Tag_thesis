@@ -1,4 +1,5 @@
-# Tag — play, self-handicapping, and predictive processing
+# Cognitive Science Master Thesis on Tag 
+## play, self-handicapping, and predictive processing
 
 ![Chase dynamics](ABM/chase-dynamics.gif)
 
