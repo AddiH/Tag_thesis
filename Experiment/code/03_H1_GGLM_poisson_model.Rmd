@@ -11,7 +11,7 @@ output:
 
 ```{r setup, message=FALSE, warning=FALSE}
 #install.packages("pacman")
-pacman::p_load(tidyverse, lme4, parameters, merDeriv)
+pacman::p_load(tidyverse, lme4, parameters)
 
 theme_set(theme_minimal())
 ```
@@ -43,11 +43,10 @@ df <- df %>%
   mutate(
     player_id     = factor(player_id),
     group         = factor(group),
-    condition_FUN = as.integer(condition == "FUN"),   # numeric 0/1 for GEE
+    condition_FUN = as.integer(condition == "FUN"),   # numeric 0/1 for GGLM
     round_c       = round - mean(round),              # centred round position
     encounter     = factor(encounter)
   ) %>%
-  # geepack requires data sorted by the clustering variable
   arrange(player_id)
 ```
 
